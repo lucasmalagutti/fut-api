@@ -1,0 +1,390 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum Role {
+  player
+  owner
+  master
+}
+
+enum UserStatus {
+  active
+  inactive
+  banned
+  deleted
+}
+
+enum CourtStatus {
+  active
+  inactive
+}
+
+enum BookingStatus {
+  pending
+  confirmed
+  completed
+  cancelled
+}
+
+enum InviteStatus {
+  pending
+  accepted
+  declined
+  cancelled
+}
+
+enum PartStatus {
+  joined
+  checked_in
+  cancelled
+}
+
+enum PayMethod {
+  card
+  pix
+}
+
+enum PayStatus {
+  pending
+  paid
+  refunded
+  failed
+}
+
+enum TxType {
+  booking_charge
+  payout
+  refund
+  fee
+  adjustment
+}
+
+enum TxStatus {
+  pending
+  completed
+  failed
+}
+
+enum ReportStatus {
+  open
+  reviewed
+  closed
+}
+
+model User {
+  id           String     @id @default(uuid())
+  role         Role
+  name         String
+  email        String     @unique
+  passwordHash String
+  phone        String?
+  avatarUrl    String?
+  status       UserStatus @default(active)
+  banReason    String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  courts          Court[]            @relation("OwnerCourts")
+  bookings        Booking[]          @relation("PlayerBookings")
+  cards           Card[]
+  bankAccounts    BankAccount[]
+  wallet          Wallet?
+  reviews         Review[]
+  reportsMade     Report[]           @relation("ReporterReports")
+  reportsReceived Report[]           @relation("ReportedReports")
+  notifications   Notification[]
+  deviceTokens    DeviceToken[]
+  matchesHosted   Match[]            @relation("HostMatches")
+  invitesSent     MatchInvite[]      @relation("InvitesFrom")
+  invitesReceived MatchInvite[]      @relation("InvitesTo")
+  participations  MatchParticipant[]
+  threadsA        ChatThread[]       @relation("ThreadUserA")
+  threadsB        ChatThread[]       @relation("ThreadUserB")
+  messages        ChatMessage[]
+  payouts         Payout[]
+  auditEvents     AuditLog[]
+}
+
+model Court {
+  id          String      @id @default(uuid())
+  owner       User        @relation("OwnerCourts", fields: [ownerId], references: [id])
+  ownerId     String
+  name        String
+  sport       String
+  description String?
+  addressLine String
+  city        String
+  state       String
+  zip         String
+  latitude    Float
+  longitude   Float
+  amenities   String
+  rules       String?
+  status      CourtStatus @default(active)
+  ratingAvg   Float       @default(0)
+  ratingCount Int         @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  photos    CourtPhoto[]
+  schedules CourtSchedule[]
+  blocks    CourtBlock[]
+  bookings  Booking[]
+  reviews   Review[]
+}
+
+model CourtPhoto {
+  id       String @id @default(uuid())
+  court    Court  @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  courtId  String
+  url      String
+  position Int    @default(0)
+}
+
+model CourtSchedule {
+  id          String @id @default(uuid())
+  court       Court  @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  courtId     String
+  dayOfWeek   Int
+  openTime    String
+  closeTime   String
+  slotMinutes Int    @default(60)
+  basePrice   Float
+}
+
+model CourtBlock {
+  id       String   @id @default(uuid())
+  court    Court    @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  courtId  String
+  startsAt DateTime
+  endsAt   DateTime
+  reason   String?
+}
+
+model Booking {
+  id                 String        @id @default(uuid())
+  court              Court         @relation(fields: [courtId], references: [id])
+  courtId            String
+  player             User          @relation("PlayerBookings", fields: [playerId], references: [id])
+  playerId           String
+  startsAt           DateTime
+  endsAt             DateTime
+  totalPrice         Float
+  status             BookingStatus @default(pending)
+  cancellationReason String?
+  createdAt          DateTime      @default(now())
+
+  match   Match?
+  payment Payment?
+  review  Review?
+  txs     Transaction[]
+
+  @@index([courtId, startsAt, endsAt])
+}
+
+model Match {
+  id             String   @id @default(uuid())
+  booking        Booking  @relation(fields: [bookingId], references: [id])
+  bookingId      String   @unique
+  host           User     @relation("HostMatches", fields: [hostId], references: [id])
+  hostId         String
+  sport          String
+  slots          Int
+  pricePerPlayer Float
+  isPublic       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  invites      MatchInvite[]
+  participants MatchParticipant[]
+}
+
+model MatchInvite {
+  id        String       @id @default(uuid())
+  match     Match        @relation(fields: [matchId], references: [id])
+  matchId   String
+  from      User         @relation("InvitesFrom", fields: [fromId], references: [id])
+  fromId    String
+  to        User         @relation("InvitesTo", fields: [toId], references: [id])
+  toId      String
+  status    InviteStatus @default(pending)
+  createdAt DateTime     @default(now())
+}
+
+model MatchParticipant {
+  id      String     @id @default(uuid())
+  match   Match      @relation(fields: [matchId], references: [id])
+  matchId String
+  user    User       @relation(fields: [userId], references: [id])
+  userId  String
+  status  PartStatus @default(joined)
+
+  @@unique([matchId, userId])
+}
+
+model Card {
+  id            String  @id @default(uuid())
+  user          User    @relation(fields: [userId], references: [id])
+  userId        String
+  providerToken String
+  brand         String
+  last4         String
+  holderName    String
+  expMonth      Int
+  expYear       Int
+  isDefault     Boolean @default(false)
+}
+
+model BankAccount {
+  id            String   @id @default(uuid())
+  user          User     @relation(fields: [userId], references: [id])
+  userId        String
+  holderName    String
+  document      String
+  bank          String
+  agency        String
+  accountNumber String
+  accountType   String
+  pixKey        String?
+  payouts       Payout[]
+}
+
+model Wallet {
+  id        String        @id @default(uuid())
+  user      User          @relation(fields: [userId], references: [id])
+  userId    String        @unique
+  balance   Float         @default(0)
+  updatedAt DateTime      @updatedAt
+  txs       Transaction[]
+}
+
+model Transaction {
+  id         String   @id @default(uuid())
+  wallet     Wallet   @relation(fields: [walletId], references: [id])
+  walletId   String
+  type       TxType
+  booking    Booking? @relation(fields: [bookingId], references: [id])
+  bookingId  String?
+  amount     Float
+  status     TxStatus @default(pending)
+  gatewayRef String?
+  createdAt  DateTime @default(now())
+}
+
+model Payment {
+  id         String    @id @default(uuid())
+  booking    Booking   @relation(fields: [bookingId], references: [id])
+  bookingId  String    @unique
+  method     PayMethod
+  gatewayRef String
+  qrCode     String?
+  amount     Float
+  fee        Float
+  status     PayStatus @default(pending)
+  paidAt     DateTime?
+  createdAt  DateTime  @default(now())
+}
+
+model Payout {
+  id            String      @id @default(uuid())
+  owner         User        @relation(fields: [ownerId], references: [id])
+  ownerId       String
+  bankAccount   BankAccount @relation(fields: [bankAccountId], references: [id])
+  bankAccountId String
+  amount        Float
+  status        TxStatus    @default(pending)
+  gatewayRef    String?
+  createdAt     DateTime    @default(now())
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  booking   Booking  @relation(fields: [bookingId], references: [id])
+  bookingId String   @unique
+  from      User     @relation(fields: [fromId], references: [id])
+  fromId    String
+  court     Court    @relation(fields: [courtId], references: [id])
+  courtId   String
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+}
+
+model ChatThread {
+  id            String        @id @default(uuid())
+  userA         User          @relation("ThreadUserA", fields: [userAId], references: [id])
+  userAId       String
+  userB         User          @relation("ThreadUserB", fields: [userBId], references: [id])
+  userBId       String
+  lastMessageAt DateTime?
+  createdAt     DateTime      @default(now())
+  messages      ChatMessage[]
+
+  @@unique([userAId, userBId])
+}
+
+model ChatMessage {
+  id        String     @id @default(uuid())
+  thread    ChatThread @relation(fields: [threadId], references: [id])
+  threadId  String
+  sender    User       @relation(fields: [senderId], references: [id])
+  senderId  String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime   @default(now())
+}
+
+model Report {
+  id             String       @id @default(uuid())
+  reporter       User         @relation("ReporterReports", fields: [reporterId], references: [id])
+  reporterId     String
+  reportedUser   User         @relation("ReportedReports", fields: [reportedUserId], references: [id])
+  reportedUserId String
+  reason         String
+  description    String?
+  status         ReportStatus @default(open)
+  resolutionNote String?
+  resolvedById   String?
+  createdAt      DateTime     @default(now())
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  user      User      @relation(fields: [userId], references: [id])
+  userId    String
+  type      String
+  payload   String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  expoToken String   @unique
+  platform  String
+  createdAt DateTime @default(now())
+}
+
+model PlatformSetting {
+  id          Int      @id @default(1)
+  feeRate     Float    @default(0.1)
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  actor     User     @relation(fields: [actorId], references: [id])
+  actorId   String
+  action    String
+  target    String
+  payload   String
+  createdAt DateTime @default(now())
+}
