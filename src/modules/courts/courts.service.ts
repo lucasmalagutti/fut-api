@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -27,6 +28,15 @@ export class CourtsService {
   constructor(private prisma: PrismaService) {}
 
   async create(owner: User, dto: CreateCourtDto) {
+    const ownerCourts = await this.prisma.court.findMany({
+      where: { ownerId: owner.id, status: { not: 'inactive' } },
+      select: { name: true },
+    });
+    const duplicate = ownerCourts.some(
+      (c) => c.name.trim().toLowerCase() === dto.name.trim().toLowerCase(),
+    );
+    if (duplicate) throw new BadRequestException('Você já possui uma quadra com esse nome.');
+
     return this.prisma.court.create({
       data: {
         ownerId: owner.id,
@@ -40,9 +50,10 @@ export class CourtsService {
         latitude: dto.latitude,
         longitude: dto.longitude,
         amenities: JSON.stringify(dto.amenities ?? []),
-        rules: dto.rules,
+        rules: dto.rules || undefined,
+        mapsUrl: dto.mapsUrl || undefined,
       },
-      include: { photos: true, schedules: true },
+      include: { photos: { orderBy: { createdAt: 'asc' } }, schedules: true },
     });
   }
 
@@ -57,18 +68,21 @@ export class CourtsService {
     ratingMin?: string;
     q?: string;
     order?: string;
+    ownerId?: string;
   }) {
     const courts = await this.prisma.court.findMany({
       where: {
-        status: 'active',
+        ...(query.ownerId ? { ownerId: query.ownerId } : { status: 'active' }),
         ...(query.sport && { sport: query.sport }),
         ...(query.q && { name: { contains: query.q } }),
         ...(query.ratingMin && { ratingAvg: { gte: parseFloat(query.ratingMin) } }),
       },
-      include: { photos: true, schedules: true },
+      include: { photos: { orderBy: { createdAt: 'asc' } }, schedules: true },
     });
 
-    let result = courts.map((c) => ({
+    type CourtRow = (typeof courts)[number] & { amenities: any; distanceKm: number | undefined };
+
+    let result: CourtRow[] = courts.map((c) => ({
       ...c,
       amenities: JSON.parse(c.amenities || '[]'),
       distanceKm: undefined as number | undefined,
@@ -104,7 +118,7 @@ export class CourtsService {
   async findOne(id: string) {
     const court = await this.prisma.court.findUnique({
       where: { id },
-      include: { photos: true, schedules: true, blocks: true },
+      include: { photos: { orderBy: { createdAt: 'asc' } }, schedules: true, blocks: true },
     });
     if (!court) throw new NotFoundException('Court not found');
     return { ...court, amenities: JSON.parse(court.amenities || '[]') };
@@ -130,7 +144,29 @@ export class CourtsService {
 
   async addPhoto(owner: User, courtId: string, url: string, position = 0) {
     await this.assertOwner(owner.id, courtId);
+    const count = await this.prisma.courtPhoto.count({ where: { courtId } });
+    if (count >= 5) throw new BadRequestException('Máximo de 5 fotos por quadra.');
     return this.prisma.courtPhoto.create({ data: { courtId, url, position } });
+  }
+
+  async removePhoto(owner: User, courtId: string, photoId: string) {
+    await this.assertOwner(owner.id, courtId);
+    await this.prisma.courtPhoto.delete({ where: { id: photoId } });
+    return { message: 'Photo removed' };
+  }
+
+  async getSchedulesByCourtId(courtId: string) {
+    return this.prisma.courtSchedule.findMany({
+      where: { courtId },
+      orderBy: { dayOfWeek: 'asc' },
+    });
+  }
+
+  async getBlocksByCourtId(courtId: string) {
+    return this.prisma.courtBlock.findMany({
+      where: { courtId },
+      orderBy: { startsAt: 'asc' },
+    });
   }
 
   async addSchedule(owner: User, courtId: string, dto: CreateScheduleDto) {
@@ -145,6 +181,18 @@ export class CourtsService {
     });
   }
 
+  async removeBlock(owner: User, courtId: string, blockId: string) {
+    await this.assertOwner(owner.id, courtId);
+    await this.prisma.courtBlock.delete({ where: { id: blockId } });
+    return { message: 'Block removed' };
+  }
+
+  async removeSchedule(owner: User, courtId: string, scheduleId: string) {
+    await this.assertOwner(owner.id, courtId);
+    await this.prisma.courtSchedule.delete({ where: { id: scheduleId } });
+    return { message: 'Schedule removed' };
+  }
+
   async getAvailability(courtId: string, dateStr: string) {
     const court = await this.prisma.court.findUnique({
       where: { id: courtId },
@@ -155,41 +203,33 @@ export class CourtsService {
     const date = new Date(dateStr);
     const dayOfWeek = date.getDay();
     const schedule = court.schedules.find((s) => s.dayOfWeek === dayOfWeek);
-    if (!schedule) return { date: dateStr, slots: [] };
+    if (!schedule) return { date: dateStr, open: false, openTime: null, closeTime: null, pricePerHour: 0, unavailable: [] };
 
-    const [openH, openM] = schedule.openTime.split(':').map(Number);
-    const [closeH, closeM] = schedule.closeTime.split(':').map(Number);
+    // Day boundaries
+    const dayStart = new Date(date);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(date);
+    dayEnd.setHours(23, 59, 59, 999);
 
-    const slots: { startsAt: string; endsAt: string; available: boolean; price: number }[] = [];
-    let cursor = new Date(date);
-    cursor.setHours(openH, openM, 0, 0);
-    const end = new Date(date);
-    end.setHours(closeH, closeM, 0, 0);
+    // Collect unavailable windows (blocks + confirmed bookings) for this day
+    const unavailable: { startsAt: string; endsAt: string; reason: 'block' | 'booking' }[] = [];
 
-    while (cursor < end) {
-      const slotEnd = new Date(cursor.getTime() + schedule.slotMinutes * 60 * 1000);
-      if (slotEnd > end) break;
+    court.blocks
+      .filter((b) => b.startsAt < dayEnd && b.endsAt > dayStart)
+      .forEach((b) => unavailable.push({ startsAt: b.startsAt.toISOString(), endsAt: b.endsAt.toISOString(), reason: 'block' }));
 
-      const blocked = court.blocks.some(
-        (b) => b.startsAt < slotEnd && b.endsAt > cursor,
-      );
-      const booked = court.bookings.some(
-        (b) =>
-          ['pending', 'confirmed'].includes(b.status) &&
-          b.startsAt < slotEnd &&
-          b.endsAt > cursor,
-      );
+    court.bookings
+      .filter((b) => ['pending', 'confirmed'].includes(b.status) && b.startsAt < dayEnd && b.endsAt > dayStart)
+      .forEach((b) => unavailable.push({ startsAt: b.startsAt.toISOString(), endsAt: b.endsAt.toISOString(), reason: 'booking' }));
 
-      slots.push({
-        startsAt: cursor.toISOString(),
-        endsAt: slotEnd.toISOString(),
-        available: !blocked && !booked,
-        price: schedule.basePrice,
-      });
-      cursor = slotEnd;
-    }
-
-    return { date: dateStr, slots };
+    return {
+      date: dateStr,
+      open: true,
+      openTime: schedule.openTime,
+      closeTime: schedule.closeTime,
+      pricePerHour: schedule.basePrice,
+      unavailable,
+    };
   }
 
   async getReviews(courtId: string) {

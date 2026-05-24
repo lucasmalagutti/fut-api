@@ -4,7 +4,8 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: true necessario para verificar assinatura do webhook Stripe
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   app.enableCors({ origin: process.env.APP_ORIGIN ?? '*' });
 
@@ -14,7 +15,7 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('FutMatch API')
-    .setDescription('Plataforma de intermediação de espaços esportivos')
+    .setDescription('Plataforma de intermediacao de espacos esportivos')
     .setVersion('1.0')
     .addBearerAuth()
     .build();

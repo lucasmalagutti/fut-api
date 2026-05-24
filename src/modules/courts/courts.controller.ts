@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -63,9 +64,14 @@ export class CourtsController {
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: './storage/courts',
-        filename: (_req, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
+        destination: path.join(process.cwd(), 'storage', 'courts'),
+        filename: (_req, file, cb) => {
+          const ext = path.extname(file.originalname) || '.jpg';
+          cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+        },
       }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => cb(null, file.mimetype.startsWith('image/')),
     }),
   )
   addPhoto(
@@ -74,13 +80,26 @@ export class CourtsController {
     @UploadedFile() file: Express.Multer.File,
     @Body('position') position: string,
   ) {
+    if (!file) throw new BadRequestException('Nenhum arquivo enviado');
+    // Salva caminho relativo — o app monta a URL absoluta com a API_URL do .env
     const url = `/storage/courts/${file.filename}`;
     return this.courts.addPhoto(user, id, url, parseInt(position ?? '0'));
+  }
+
+  @Roles('owner')
+  @Delete(':id/photos/:photoId')
+  removePhoto(@CurrentUser() user: User, @Param('id') id: string, @Param('photoId') photoId: string) {
+    return this.courts.removePhoto(user, id, photoId);
   }
 
   @Get(':id/availability')
   availability(@Param('id') id: string, @Query('date') date: string) {
     return this.courts.getAvailability(id, date);
+  }
+
+  @Get(':id/schedules')
+  getSchedules(@Param('id') id: string) {
+    return this.courts.getSchedulesByCourtId(id);
   }
 
   @Roles('owner')
@@ -89,10 +108,27 @@ export class CourtsController {
     return this.courts.addSchedule(user, id, dto);
   }
 
+  @Get(':id/blocks')
+  getBlocks(@Param('id') id: string) {
+    return this.courts.getBlocksByCourtId(id);
+  }
+
   @Roles('owner')
   @Post(':id/blocks')
   addBlock(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: CreateBlockDto) {
     return this.courts.addBlock(user, id, dto);
+  }
+
+  @Roles('owner')
+  @Delete(':id/blocks/:blockId')
+  removeBlock(@CurrentUser() user: User, @Param('id') id: string, @Param('blockId') blockId: string) {
+    return this.courts.removeBlock(user, id, blockId);
+  }
+
+  @Roles('owner')
+  @Delete(':id/schedules/:scheduleId')
+  removeSchedule(@CurrentUser() user: User, @Param('id') id: string, @Param('scheduleId') scheduleId: string) {
+    return this.courts.removeSchedule(user, id, scheduleId);
   }
 
   @Get(':id/reviews')

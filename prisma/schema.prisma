@@ -78,17 +78,19 @@ enum ReportStatus {
 }
 
 model User {
-  id           String     @id @default(uuid())
-  role         Role
-  name         String
-  email        String     @unique
-  passwordHash String
-  phone        String?
-  avatarUrl    String?
-  status       UserStatus @default(active)
-  banReason    String?
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  id               String     @id @default(uuid())
+  role             Role
+  name             String
+  email            String     @unique
+  passwordHash     String
+  phone            String?
+  avatarUrl        String?
+  status           UserStatus @default(active)
+  banReason        String?
+  stripeCustomerId String?
+  stripeAccountId  String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
   courts          Court[]            @relation("OwnerCourts")
   bookings        Booking[]          @relation("PlayerBookings")
@@ -126,6 +128,7 @@ model Court {
   longitude   Float
   amenities   String
   rules       String?
+  mapsUrl     String?
   status      CourtStatus @default(active)
   ratingAvg   Float       @default(0)
   ratingCount Int         @default(0)
@@ -140,11 +143,12 @@ model Court {
 }
 
 model CourtPhoto {
-  id       String @id @default(uuid())
-  court    Court  @relation(fields: [courtId], references: [id], onDelete: Cascade)
-  courtId  String
-  url      String
-  position Int    @default(0)
+  id        String   @id @default(uuid())
+  court     Court    @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  courtId   String
+  url       String
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
 }
 
 model CourtSchedule {
@@ -283,6 +287,7 @@ model Payment {
   method     PayMethod
   gatewayRef String
   qrCode     String?
+  qrCodeUrl  String?
   amount     Float
   fee        Float
   status     PayStatus @default(pending)

@@ -18,7 +18,7 @@ export class CreateScheduleDto {
 
   @ApiPropertyOptional({ default: 60 })
   @IsInt()
-  slotMinutes: number = 60;
+  slotMinutes: number = 1;
 
   @ApiProperty()
   @IsNumber()

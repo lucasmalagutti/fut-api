@@ -1,18 +1,13 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import StripeLib = require('stripe');
 import { PrismaService } from '../../prisma/prisma.service';
-
-export class CreateBankAccountDto {
-  holderName!: string;
-  document!: string;
-  bank!: string;
-  agency!: string;
-  accountNumber!: string;
-  accountType!: string;
-  pixKey?: string;
-}
+import { CreateBankAccountDto } from './dto/create-bank-account.dto';
 
 @Injectable()
 export class WalletService {
+  private readonly logger = new Logger(WalletService.name);
+  private stripe = new StripeLib(process.env.STRIPE_SECRET_KEY ?? 'sk_test_placeholder');
+
   constructor(private prisma: PrismaService) {}
 
   async getWallet(userId: string) {
@@ -40,6 +35,15 @@ export class WalletService {
     return this.prisma.bankAccount.findMany({ where: { userId } });
   }
 
+  async deleteBankAccount(userId: string, bankAccountId: string) {
+    const account = await this.prisma.bankAccount.findUnique({ where: { id: bankAccountId } });
+    if (!account || account.userId !== userId) {
+      throw new NotFoundException('Bank account not found');
+    }
+    await this.prisma.bankAccount.delete({ where: { id: bankAccountId } });
+    return { message: 'Bank account removed' };
+  }
+
   async requestPayout(userId: string, bankAccountId: string, amount: number) {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) throw new NotFoundException('Wallet not found');
@@ -50,13 +54,51 @@ export class WalletService {
       throw new NotFoundException('Bank account not found');
     }
 
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    let stripeAccountId: string | null = user.stripeAccountId ?? null;
+
+    if (!stripeAccountId) {
+      const account = await this.stripe.accounts.create({
+        type: 'express',
+        country: 'BR',
+        email: user.email,
+        capabilities: { transfers: { requested: true } },
+        business_type: 'individual',
+        metadata: { userId },
+      });
+      stripeAccountId = account.id;
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { stripeAccountId },
+      });
+      this.logger.log(`Stripe Connect account created: ${stripeAccountId}`);
+    }
+
+    const amountCents = Math.round(amount * 100);
+    let gatewayRef = `local_payout_${Date.now()}`;
+
+    try {
+      const transfer = await this.stripe.transfers.create({
+        amount: amountCents,
+        currency: 'brl',
+        destination: stripeAccountId,
+        metadata: { userId, bankAccountId },
+      });
+      gatewayRef = transfer.id;
+      this.logger.log(`Stripe transfer created: ${transfer.id}`);
+    } catch (err) {
+      this.logger.warn(`Stripe transfer failed (sandbox): ${(err as Error).message}`);
+    }
+
     const payout = await this.prisma.$transaction(async (tx) => {
       await tx.wallet.update({
         where: { userId },
         data: { balance: { decrement: amount } },
       });
       const p = await tx.payout.create({
-        data: { ownerId: userId, bankAccountId, amount, status: 'completed', gatewayRef: `mock_payout_${Date.now()}` },
+        data: { ownerId: userId, bankAccountId, amount, status: 'completed', gatewayRef },
       });
       await tx.transaction.create({
         data: { walletId: wallet.id, type: 'payout', amount: -amount, status: 'completed' },

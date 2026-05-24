@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import { IsArray, IsNumber, IsOptional, IsString } from 'class-validator';
 
 export class CreateCourtDto {
@@ -32,10 +33,12 @@ export class CreateCourtDto {
   zip!: string;
 
   @ApiProperty()
+  @Type(() => Number)
   @IsNumber()
   latitude!: number;
 
   @ApiProperty()
+  @Type(() => Number)
   @IsNumber()
   longitude!: number;
 
@@ -48,4 +51,9 @@ export class CreateCourtDto {
   @IsOptional()
   @IsString()
   rules?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  mapsUrl?: string;
 }

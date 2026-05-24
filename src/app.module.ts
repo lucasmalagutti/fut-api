@@ -25,7 +25,7 @@ import { PrismaModule } from './prisma/prisma.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
-    ServeStaticModule.forRoot({ rootPath: join(__dirname, '..', 'storage'), serveRoot: '/storage' }),
+    ServeStaticModule.forRoot({ rootPath: join(process.cwd(), 'storage'), serveRoot: '/storage' }),
     PrismaModule,
     MailModule,
     AuthModule,

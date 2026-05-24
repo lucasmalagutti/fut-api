@@ -1,6 +1,7 @@
 export interface CheckoutResult {
   gatewayRef: string;
   qrCode?: string;
+  qrCodeUrl?: string;
 }
 
 export interface PaymentProvider {

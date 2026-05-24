@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { User } from '@prisma/client';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CreateBankAccountDto, WalletService } from './wallet.service';
+import { CreateBankAccountDto } from './dto/create-bank-account.dto';
+import { WalletService } from './wallet.service';
 
 @ApiTags('wallet')
 @ApiBearerAuth()
@@ -41,6 +42,12 @@ export class WalletController {
     @Body('amount') amount: number,
   ) {
     return this.wallet.requestPayout(user.id, bankAccountId, amount);
+  }
+
+  @Roles('owner')
+  @Delete('bank-accounts/:id')
+  deleteBankAccount(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.wallet.deleteBankAccount(user.id, id);
   }
 
   @Roles('owner')
