@@ -36,6 +36,22 @@ export class UsersService {
     return { message: 'Account deleted' };
   }
 
+  // Bloquear conta por PIX pendente
+  async blockUser(userId: string, reason: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { blockedAt: new Date(), blockReason: reason },
+    });
+  }
+
+  // Desbloquear conta apos quitacao
+  async unblockUser(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { blockedAt: null, blockReason: null },
+    });
+  }
+
   async findAll(query: { q?: string; role?: string; status?: string; order?: string }) {
     const users = await this.prisma.user.findMany({
       where: {

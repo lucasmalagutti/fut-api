@@ -23,6 +23,24 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Desserializa court do banco: amenities JSON → array, sport JSON → string[] ou string
+function parseCourt<T extends { amenities: string; sport: string }>(court: T) {
+  let sports: string[];
+  try {
+    const parsed = JSON.parse(court.sport);
+    sports = Array.isArray(parsed) ? parsed : [court.sport];
+  } catch {
+    sports = court.sport ? [court.sport] : [];
+  }
+  return {
+    ...court,
+    sports,
+    // Mantém sport como primeiro esporte para retrocompat
+    sport: sports[0] ?? court.sport,
+    amenities: (() => { try { return JSON.parse(court.amenities || '[]'); } catch { return []; } })(),
+  };
+}
+
 @Injectable()
 export class CourtsService {
   constructor(private prisma: PrismaService) {}
@@ -37,11 +55,16 @@ export class CourtsService {
     );
     if (duplicate) throw new BadRequestException('Você já possui uma quadra com esse nome.');
 
-    return this.prisma.court.create({
+    // sport armazena JSON array quando multiplos esportes, string simples quando unico (retrocompat)
+    const sportValue = Array.isArray(dto.sports)
+      ? JSON.stringify(dto.sports)
+      : (dto.sport ?? '');
+
+    const court = await this.prisma.court.create({
       data: {
         ownerId: owner.id,
         name: dto.name,
-        sport: dto.sport,
+        sport: sportValue,
         description: dto.description,
         addressLine: dto.addressLine,
         city: dto.city,
@@ -55,6 +78,7 @@ export class CourtsService {
       },
       include: { photos: { orderBy: { createdAt: 'asc' } }, schedules: true },
     });
+    return parseCourt(court);
   }
 
   async findAll(query: {
@@ -73,18 +97,18 @@ export class CourtsService {
     const courts = await this.prisma.court.findMany({
       where: {
         ...(query.ownerId ? { ownerId: query.ownerId } : { status: 'active' }),
-        ...(query.sport && { sport: query.sport }),
+        // Filtro de esporte: usa contains para suportar JSON array armazenado
+        ...(query.sport && { sport: { contains: query.sport } }),
         ...(query.q && { name: { contains: query.q } }),
         ...(query.ratingMin && { ratingAvg: { gte: parseFloat(query.ratingMin) } }),
       },
       include: { photos: { orderBy: { createdAt: 'asc' } }, schedules: true },
     });
 
-    type CourtRow = (typeof courts)[number] & { amenities: any; distanceKm: number | undefined };
+    type CourtRow = ReturnType<typeof parseCourt<(typeof courts)[number]>> & { distanceKm: number | undefined };
 
     let result: CourtRow[] = courts.map((c) => ({
-      ...c,
-      amenities: JSON.parse(c.amenities || '[]'),
+      ...parseCourt(c),
       distanceKm: undefined as number | undefined,
     }));
 
@@ -121,19 +145,26 @@ export class CourtsService {
       include: { photos: { orderBy: { createdAt: 'asc' } }, schedules: true, blocks: true },
     });
     if (!court) throw new NotFoundException('Court not found');
-    return { ...court, amenities: JSON.parse(court.amenities || '[]') };
+    return parseCourt(court);
   }
 
   async update(owner: User, id: string, dto: UpdateCourtDto) {
     await this.assertOwner(owner.id, id);
-    const { amenities, ...rest } = dto;
-    return this.prisma.court.update({
+    const { amenities, sports, sport, ...rest } = dto as any;
+
+    const sportValue = Array.isArray(sports)
+      ? JSON.stringify(sports)
+      : (sport !== undefined ? sport : undefined);
+
+    const court = await this.prisma.court.update({
       where: { id },
       data: {
         ...rest,
+        ...(sportValue !== undefined && { sport: sportValue }),
         ...(amenities !== undefined && { amenities: JSON.stringify(amenities) }),
       },
     });
+    return parseCourt(court);
   }
 
   async remove(owner: User, id: string) {
@@ -218,8 +249,15 @@ export class CourtsService {
       .filter((b) => b.startsAt < dayEnd && b.endsAt > dayStart)
       .forEach((b) => unavailable.push({ startsAt: b.startsAt.toISOString(), endsAt: b.endsAt.toISOString(), reason: 'block' }));
 
+    const pendingTTL = new Date(Date.now() - 30 * 60 * 1000);
     court.bookings
-      .filter((b) => ['pending', 'confirmed'].includes(b.status) && b.startsAt < dayEnd && b.endsAt > dayStart)
+      .filter((b) => {
+        if (!['pending', 'confirmed'].includes(b.status)) return false;
+        if (b.startsAt >= dayEnd || b.endsAt <= dayStart) return false;
+        // Pending sem pagamento expiram em 30min — nao bloquear slot na UI
+        if (b.status === 'pending' && b.createdAt < pendingTTL) return false;
+        return true;
+      })
       .forEach((b) => unavailable.push({ startsAt: b.startsAt.toISOString(), endsAt: b.endsAt.toISOString(), reason: 'booking' }));
 
     return {

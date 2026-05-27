@@ -32,19 +32,29 @@ export class BookingsService {
     const endsAt = new Date(dto.endsAt);
 
     const durationMs = endsAt.getTime() - startsAt.getTime();
+    const durationHours = durationMs / (1000 * 60 * 60); // sempre em horas
     const dayOfWeek = startsAt.getDay();
     const schedule = court.schedules.find((s) => s.dayOfWeek === dayOfWeek);
-    const pricePerSlot = schedule?.basePrice ?? 0;
-    const slots = durationMs / (1000 * 60 * (schedule?.slotMinutes ?? 60));
-    const totalPrice = pricePerSlot * slots;
+    const pricePerHour = schedule?.basePrice ?? 0;
+    const totalPrice = parseFloat((pricePerHour * durationHours).toFixed(2));
 
     const booking = await this.prisma.$transaction(async (tx) => {
+      // Reservas pending sem pagamento expiram em 30 minutos (TTL)
+      const pendingTTL = new Date(Date.now() - 30 * 60 * 1000);
+
       const overlap = await tx.booking.findFirst({
         where: {
           courtId: dto.courtId,
-          status: { in: ['pending', 'confirmed'] },
           startsAt: { lt: endsAt },
           endsAt: { gt: startsAt },
+          OR: [
+            // Confirmadas sempre bloqueiam
+            { status: 'confirmed' },
+            // Open (aguardando quorum) bloqueiam
+            { status: 'open' },
+            // Pending sem pagamento expiram em 30min
+            { status: 'pending', createdAt: { gt: pendingTTL } },
+          ],
         },
       });
       if (overlap) throw new ConflictException('Time slot already booked');
@@ -56,7 +66,7 @@ export class BookingsService {
           startsAt,
           endsAt,
           totalPrice,
-          status: 'confirmed',
+          status: 'open',
         },
         include: { court: true },
       });
@@ -161,5 +171,26 @@ export class BookingsService {
       where: { status: 'confirmed', endsAt: { lt: new Date() } },
       data: { status: 'completed' },
     });
+  }
+
+  // Cancela reservas pending sem pagamento apos 30 minutos (libera o slot)
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async expirePendingBookings() {
+    const ttl = new Date(Date.now() - 30 * 60 * 1000);
+    const expired = await this.prisma.booking.findMany({
+      where: {
+        status: 'pending',
+        createdAt: { lt: ttl },
+        payment: null,
+      },
+      select: { id: true },
+    });
+
+    if (expired.length > 0) {
+      await this.prisma.booking.updateMany({
+        where: { id: { in: expired.map((b) => b.id) } },
+        data: { status: 'cancelled', cancellationReason: 'Payment timeout' },
+      });
+    }
   }
 }

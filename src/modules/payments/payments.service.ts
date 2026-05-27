@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
@@ -43,21 +44,38 @@ export class PaymentsService {
     if (!booking) throw new NotFoundException('Booking not found');
     if (booking.playerId !== user.id) throw new ForbiddenException();
     if (booking.payment) throw new BadRequestException('Already paid');
+    if (!['pending', 'confirmed'].includes(booking.status)) {
+      throw new BadRequestException('Booking cannot be paid in its current status');
+    }
 
     const setting = await this.prisma.platformSetting.findUnique({ where: { id: 1 } });
-    const feeRate = setting?.feeRate ?? 0.1;
+    const feeRate = setting?.feeRate ?? Number(process.env.DEFAULT_FEE_RATE ?? 0.1);
     const fee = booking.totalPrice * feeRate;
 
     let result: { gatewayRef: string; qrCode?: string; qrCodeUrl?: string };
 
-    if (dto.method === 'card') {
-      if (!dto.cardId) throw new BadRequestException('cardId required for card payment');
-      const card = await this.prisma.card.findUnique({ where: { id: dto.cardId } });
-      if (!card || card.userId !== user.id) throw new NotFoundException('Card not found');
-      result = await this.provider.checkoutCard(booking.id, card.providerToken, booking.totalPrice);
-    } else {
-      result = await this.provider.checkoutPix(booking.id, booking.totalPrice);
+    try {
+      if (dto.method === 'card') {
+        if (!dto.cardId) throw new BadRequestException('cardId required for card payment');
+        const card = await this.prisma.card.findUnique({ where: { id: dto.cardId } });
+        if (!card || card.userId !== user.id) throw new NotFoundException('Card not found');
+        result = await this.provider.checkoutCard(booking.id, card.providerToken, booking.totalPrice);
+      } else {
+        result = await this.provider.checkoutPix(booking.id, booking.totalPrice);
+      }
+    } catch (err: any) {
+      // Erros do Stripe (tipo começa com "Stripe")
+      if (err?.type?.startsWith('Stripe')) {
+        this.logger.error(`Stripe error on checkout: ${err.message}`, err.code);
+        throw new BadRequestException(`Erro no gateway de pagamento: ${err.message}`);
+      }
+      // Erros HTTP do NestJS (BadRequest, NotFound etc) — repassar diretamente
+      if (err?.status && err.status < 500) throw err;
+      if (err?.statusCode && err.statusCode < 500) throw err;
+      throw new InternalServerErrorException('Erro ao processar pagamento');
     }
+
+    const isPix = dto.method === 'pix';
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -68,12 +86,17 @@ export class PaymentsService {
         qrCodeUrl: result.qrCodeUrl,
         amount: booking.totalPrice,
         fee,
-        status: dto.method === 'card' ? 'paid' : 'pending',
-        ...(dto.method === 'card' && { paidAt: new Date() }),
+        status: isPix ? 'pending' : 'paid',
+        ...(!isPix && { paidAt: new Date() }),
       },
     });
 
-    if (dto.method === 'card') {
+    // Cartao: confirmar booking e creditar dono imediatamente
+    if (!isPix) {
+      await this.prisma.booking.update({
+        where: { id: booking.id },
+        data: { status: 'confirmed' },
+      });
       await this.creditOwner(booking.court.ownerId, booking.id, booking.totalPrice - fee);
     }
 
@@ -98,10 +121,16 @@ export class PaymentsService {
     if (!payment) throw new NotFoundException('Payment not found');
     if (payment.status === 'paid') return { message: 'Already confirmed' };
 
-    await this.prisma.payment.update({
-      where: { id: paymentId },
-      data: { status: 'paid', paidAt: new Date() },
-    });
+    await this.prisma.$transaction([
+      this.prisma.payment.update({
+        where: { id: paymentId },
+        data: { status: 'paid', paidAt: new Date() },
+      }),
+      this.prisma.booking.update({
+        where: { id: payment.bookingId },
+        data: { status: 'confirmed' },
+      }),
+    ]);
 
     const ownerCredit = payment.amount - payment.fee;
     await this.creditOwner(payment.booking.court.ownerId, payment.bookingId, ownerCredit);
@@ -134,7 +163,7 @@ export class PaymentsService {
   private async onPaymentSucceeded(intent: Record<string, any>) {
     const payment = await this.prisma.payment.findFirst({
       where: { gatewayRef: intent.id as string },
-      include: { booking: { include: { court: true } } },
+      include: { booking: { include: { court: true, match: true } } },
     });
     if (!payment) {
       this.logger.warn(`Payment not found for gatewayRef ${intent.id}`);
@@ -147,8 +176,35 @@ export class PaymentsService {
       data: { status: 'paid', paidAt: new Date() },
     });
 
-    const ownerCredit = payment.amount - payment.fee;
-    await this.creditOwner(payment.booking.court.ownerId, payment.bookingId, ownerCredit);
+    // Se e pagamento de cota de partida (paymentId referenciado em MatchParticipant)
+    const participant = await this.prisma.matchParticipant.findFirst({
+      where: { paymentId: payment.id },
+    });
+
+    if (participant) {
+      // Fluxo coletivo: marcar participante como pago + desbloquear conta se bloqueada
+      await this.prisma.matchParticipant.update({
+        where: { id: participant.id },
+        data: { paymentStatus: 'paid' },
+      });
+      const user = await this.prisma.user.findUnique({ where: { id: participant.userId } });
+      if (user && (user as any).blockedAt) {
+        await this.prisma.user.update({
+          where: { id: participant.userId },
+          data: { blockedAt: null, blockReason: null },
+        });
+        this.logger.log(`Conta desbloqueada apos pagamento PIX: ${participant.userId}`);
+      }
+    } else {
+      // Fluxo individual (reserva direta): confirmar booking e creditar dono
+      await this.prisma.booking.update({
+        where: { id: payment.bookingId },
+        data: { status: 'confirmed' },
+      });
+      const ownerCredit = payment.amount - payment.fee;
+      await this.creditOwner(payment.booking.court.ownerId, payment.bookingId, ownerCredit);
+    }
+
     this.logger.log(`Payment ${payment.id} confirmed via webhook`);
   }
 

@@ -2,6 +2,95 @@
 
 ---
 
+## [2026-05-26] – Cancelamento de partida, filtros, múltiplos esportes e link de convite
+
+### fut-api
+
+#### Cancelamento de partida
+- Novo endpoint `DELETE /matches/:id`: cancela a partida se não confirmada ainda.
+- Marca todos os participantes como `cancelled` e a booking como `cancelled` atomicamente.
+- Retorna erro 400 se a partida já foi confirmada (quórum + pagamento processado).
+- Apenas o organizador (host) pode cancelar.
+
+#### Múltiplos esportes por quadra
+- `Court.sport` agora suporta JSON array serializado: `'["Society","Futevôlei"]'`.
+- `CourtsService.create` e `update` aceitam `sports: string[]` e serializam automaticamente.
+- `CourtsService.findAll` usa `contains` para filtrar por esporte, compatível com arrays.
+- `CourtsService.findOne` deserializa e expõe campo `sports: string[]` além de `sport` (retrocompat).
+- Helper `parseCourt()` centraliza deserialização de `amenities` e `sport` em todas as queries.
+- `CreateCourtDto` aceita `sports?: string[]` além de `sport?: string`.
+
+### fut-app
+
+#### Cancelamento de partida — interface do organizador
+- Botão "Cancelar partida" em `matches/[id].tsx`, visível apenas para o host e apenas se a partida não foi confirmada.
+- Exibe alerta de confirmação antes de executar.
+- Após cancelar, invalida cache e redireciona para Minhas Reservas.
+- `matchesService.cancel(matchId)` adicionado ao service do app.
+
+#### Compartilhamento de link de partida privada
+- Botão "Compartilhar convite" em `matches/[id].tsx` disponível para o host de partidas privadas.
+- Ícone de compartilhamento no header disponível para qualquer partida (pública ou privada).
+- Usa a React Native `Share` API com mensagem + deep link `futmatch://matches/:id` e URL web fallback.
+
+#### Minhas Reservas — novos filtros
+- Filtros adicionados: "Aguard. pagamento" e "Confirmadas".
+- "Aguard. pagamento": reservas com status `pending` + partidas com participantes em `joined` ou `unpaid`.
+- "Confirmadas": reservas com status `confirmed/completed` + partidas com `confirmedAt` preenchido.
+- Mantidos os filtros existentes: "Todas", "Reservas", "Partidas".
+
+#### Fix: bookings com status `open` não apareciam
+- `BookingCard` e `booking/[id].tsx` agora tratam status `open` com label "Partida aberta".
+- `Badge` inclui badge `primary` para status `open`.
+
+#### Múltiplos esportes — interface do dono
+- Cadastro de quadra (`new.tsx`): seleção múltipla de esportes com chips toggle; validação exige ao menos um.
+- Edição de quadra (`[id].tsx`): seleção múltipla de esportes no modal de edição; exibição de todos os esportes na info card.
+
+#### Múltiplos esportes — interface do jogador
+- `booking/new.tsx`: quando a quadra tem mais de um esporte, exibe seletor de chips para o jogador escolher o esporte da partida. Quando tem apenas um, usa-o automaticamente sem exibir seletor.
+
+---
+
+## [2026-05-26] – Interface do jogador: partidas integradas em Minhas Reservas
+
+### fut-app
+
+#### Aba Matches removida da tab bar
+- A aba "Partidas" foi removida da barra de navegação inferior do jogador.
+- As rotas `matches/index` e `matches/[id]` continuam acessíveis mas não aparecem como tab.
+- Partidas passaram a fazer parte da tela "Minhas Reservas", consolidando a navegação.
+
+#### Minhas Reservas — lista unificada de reservas e partidas
+- `bookings.tsx` reescrito para buscar reservas (`bookingsService.list()`) e partidas (`matchesService.findMine()`) em paralelo.
+- Itens são ordenados por data (mais recente primeiro) em uma lista única.
+- Filtros: "Todas", "Reservas" e "Partidas" permitem segmentar a lista.
+- Cards de partida exibem: esporte, quadra, data/horário, vagas (ocupadas/máximo), cota estimada e badge de status (Aberta / Aguard. quórum / Confirmada).
+- Ao tocar em um card de partida, navega para `/(player)/matches/[id]`.
+
+#### Criar Partida — esporte fixo da quadra
+- Removido o seletor de esportes da tela `booking/new.tsx`.
+- O esporte é herdado automaticamente do campo `court.sport` da quadra reservada.
+- O esporte é exibido como informação no card de resumo da quadra (somente leitura).
+- Garante consistência: uma quadra de Society só cria partidas de Society.
+
+#### Tela `matches/[id].tsx` — nova tela de detalhe da partida
+- Exibe informações completas: quadra, data/horário, visibilidade, organizador.
+- Countdown até o fechamento das inscrições (T-2h antes do início).
+- Barra de progresso de vagas com alerta de quórum mínimo pendente.
+- Lista de participantes com badge de status de pagamento por jogador.
+- Ações contextuais: "Entrar" (sozinho ou com convidado via modal), "Sair", "Fazer check-in".
+
+#### Tela `matches/index.tsx` — lista de partidas abertas e minhas partidas
+- Abas "Abertas" (partidas públicas disponíveis para entrar) e "Minhas" (partidas do jogador).
+- Botão "Participar" na aba "Abertas" entra na partida e navega para o detalhe.
+
+#### Tela `courts/[id].tsx` — partidas abertas na data selecionada
+- Seção "Partidas abertas nesta data" exibida quando há partidas públicas na quadra.
+- Cards compactos mostram esporte, horário e cota estimada com link para participar.
+
+---
+
 ## [2026-05-24] – Correcoes: timezone reserva, duplo submit e log de email
 
 ### fut-app

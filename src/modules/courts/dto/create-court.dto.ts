@@ -7,9 +7,15 @@ export class CreateCourtDto {
   @IsString()
   name!: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsString()
-  sport!: string;
+  sport?: string;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  sports?: string[];
 
   @ApiPropertyOptional()
   @IsOptional()

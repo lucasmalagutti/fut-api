@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsInt, IsNumber, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class CreateMatchDto {
   @ApiProperty()
@@ -10,15 +10,17 @@ export class CreateMatchDto {
   @IsString()
   sport!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'Minimo de jogadores para confirmar a partida', minimum: 2 })
   @IsInt()
-  slots!: number;
+  @Min(2)
+  minPlayers!: number;
 
-  @ApiProperty()
-  @IsNumber()
-  pricePerPlayer!: number;
+  @ApiProperty({ description: 'Maximo de vagas (jogadores + visitantes)', maximum: 50 })
+  @IsInt()
+  @Max(50)
+  maxPlayers!: number;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ default: true })
   @IsOptional()
   @IsBoolean()
   isPublic?: boolean;
