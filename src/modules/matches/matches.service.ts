@@ -11,6 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateMatchDto } from './dto/create-match.dto';
 import { JoinMatchDto } from './dto/join-match.dto';
+import { MatchPaymentPreferenceDto } from './dto/match-payment-preference.dto';
 
 @Injectable()
 export class MatchesService {
@@ -20,6 +21,20 @@ export class MatchesService {
     private prisma: PrismaService,
     private notifications: NotificationsService,
   ) {}
+
+  private async assertPaymentPreference(userId: string, payment: MatchPaymentPreferenceDto) {
+    if (payment.preferredPayMethod === 'card') {
+      if (!payment.preferredCardId) {
+        throw new BadRequestException('Selecione um cartão para cobrança automática');
+      }
+      const card = await this.prisma.card.findUnique({ where: { id: payment.preferredCardId } });
+      if (!card || card.userId !== userId) {
+        throw new NotFoundException('Cartão não encontrado');
+      }
+      return { preferredPayMethod: 'card' as const, preferredCardId: payment.preferredCardId };
+    }
+    return { preferredPayMethod: 'wallet' as const, preferredCardId: null };
+  }
 
   // Cria a sessao de quadra (Booking) e a partida (Match) atomicamente.
   // O jogador host e automaticamente o primeiro participante.
@@ -43,6 +58,8 @@ export class MatchesService {
       throw new BadRequestException('minPlayers nao pode ser maior que maxPlayers');
     }
 
+    const payPref = await this.assertPaymentPreference(user.id, dto.payment);
+
     const match = await this.prisma.$transaction(async (tx) => {
       const m = await tx.match.create({
         data: {
@@ -57,6 +74,8 @@ export class MatchesService {
               userId: user.id,
               slots: 1,
               paymentStatus: 'joined',
+              preferredPayMethod: payPref.preferredPayMethod,
+              preferredCardId: payPref.preferredCardId,
             },
           },
         },
@@ -162,11 +181,19 @@ export class MatchesService {
       throw new BadRequestException('Sem vagas suficientes nesta partida');
     }
 
+    const payPref = await this.assertPaymentPreference(user.id, dto.payment);
+
     const participant = await this.prisma.$transaction(async (tx) => {
       if (existing) {
         return tx.matchParticipant.update({
           where: { matchId_userId: { matchId, userId: user.id } },
-          data: { paymentStatus: 'joined', guestName: dto.guestName ?? null, slots: slotsNeeded },
+          data: {
+            paymentStatus: 'joined',
+            guestName: dto.guestName ?? null,
+            slots: slotsNeeded,
+            preferredPayMethod: payPref.preferredPayMethod,
+            preferredCardId: payPref.preferredCardId,
+          },
           include: { user: { select: { id: true, name: true, avatarUrl: true } } },
         });
       }
@@ -177,6 +204,8 @@ export class MatchesService {
           guestName: dto.guestName ?? null,
           slots: slotsNeeded,
           paymentStatus: 'joined',
+          preferredPayMethod: payPref.preferredPayMethod,
+          preferredCardId: payPref.preferredCardId,
         },
         include: { user: { select: { id: true, name: true, avatarUrl: true } } },
       });
@@ -234,16 +263,25 @@ export class MatchesService {
   }
 
   // Responder convite
-  async respond(matchId: string, userId: string, inviteId: string, status: 'accepted' | 'declined') {
+  async respond(
+    matchId: string,
+    userId: string,
+    inviteId: string,
+    status: 'accepted' | 'declined',
+    joinDto?: JoinMatchDto,
+  ) {
     const invite = await this.prisma.matchInvite.findUnique({ where: { id: inviteId } });
     if (!invite || invite.toId !== userId || invite.matchId !== matchId) throw new ForbiddenException();
 
     await this.prisma.matchInvite.update({ where: { id: inviteId }, data: { status } });
 
     if (status === 'accepted') {
+      if (!joinDto?.payment) {
+        throw new BadRequestException('Informe a forma de pagamento ao aceitar o convite');
+      }
       const user = await this.prisma.user.findUnique({ where: { id: userId } });
       if (user) {
-        await this.join(matchId, user, {}).catch(() => null);
+        await this.join(matchId, user, joinDto);
       }
     }
 

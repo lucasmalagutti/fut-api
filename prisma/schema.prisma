@@ -1,6 +1,5 @@
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -51,6 +50,13 @@ enum PartStatus {
 enum PayMethod {
   card
   pix
+  wallet
+}
+
+enum PaymentPurpose {
+  booking_host
+  participant_quota
+  wallet_topup
 }
 
 enum PayStatus {
@@ -66,6 +72,7 @@ enum TxType {
   refund
   fee
   adjustment
+  deposit
 }
 
 enum TxStatus {
@@ -191,9 +198,9 @@ model Booking {
   payoutReleasedAt   DateTime?
   createdAt          DateTime      @default(now())
 
-  match   Match?
-  payment Payment?
-  review  Review?
+  match    Match?
+  payments Payment[]
+  review   Review?
   txs     Transaction[]
 
   @@index([courtId, startsAt, endsAt])
@@ -230,16 +237,19 @@ model MatchInvite {
 }
 
 model MatchParticipant {
-  id            String     @id @default(uuid())
-  match         Match      @relation(fields: [matchId], references: [id])
-  matchId       String
-  user          User       @relation(fields: [userId], references: [id])
-  userId        String
-  guestName     String?
-  slots         Int        @default(1)
-  quota         Float?
-  paymentStatus PartStatus @default(joined)
-  paymentId     String?
+  id                 String     @id @default(uuid())
+  match              Match      @relation(fields: [matchId], references: [id])
+  matchId            String
+  user               User       @relation(fields: [userId], references: [id])
+  userId             String
+  guestName          String?
+  slots              Int        @default(1)
+  quota              Float?
+  paymentStatus      PartStatus @default(joined)
+  paymentId          String?
+  /** Forma de cobrança automática (2h antes): carteira ou cartão */
+  preferredPayMethod PayMethod?
+  preferredCardId    String?
 
   @@unique([matchId, userId])
 }
@@ -272,12 +282,13 @@ model BankAccount {
 }
 
 model Wallet {
-  id        String        @id @default(uuid())
-  user      User          @relation(fields: [userId], references: [id])
-  userId    String        @unique
-  balance   Float         @default(0)
-  updatedAt DateTime      @updatedAt
-  txs       Transaction[]
+  id              String        @id @default(uuid())
+  user            User          @relation(fields: [userId], references: [id])
+  userId          String        @unique
+  balance         Float         @default(0)
+  pendingBalance  Float         @default(0)
+  updatedAt       DateTime      @updatedAt
+  txs             Transaction[]
 }
 
 model Transaction {
@@ -294,18 +305,23 @@ model Transaction {
 }
 
 model Payment {
-  id         String    @id @default(uuid())
-  booking    Booking   @relation(fields: [bookingId], references: [id])
-  bookingId  String    @unique
+  id         String          @id @default(uuid())
+  userId     String
+  booking    Booking?        @relation(fields: [bookingId], references: [id])
+  bookingId  String?
+  purpose    PaymentPurpose
   method     PayMethod
   gatewayRef String
   qrCode     String?
   qrCodeUrl  String?
   amount     Float
   fee        Float
-  status     PayStatus @default(pending)
+  status     PayStatus       @default(pending)
   paidAt     DateTime?
-  createdAt  DateTime  @default(now())
+  createdAt  DateTime        @default(now())
+
+  @@index([bookingId])
+  @@index([userId])
 }
 
 model Payout {

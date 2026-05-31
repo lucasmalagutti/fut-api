@@ -4,6 +4,7 @@ import { User } from '@prisma/client';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CreateMatchDto } from './dto/create-match.dto';
 import { JoinMatchDto } from './dto/join-match.dto';
+import { RespondInviteDto } from './dto/respond-invite.dto';
 import { MatchesService } from './matches.service';
 
 @ApiTags('matches')
@@ -56,13 +57,12 @@ export class MatchesController {
 
   // Responder convite
   @Post(':id/respond')
-  respond(
-    @CurrentUser() user: User,
-    @Param('id') matchId: string,
-    @Body('inviteId') inviteId: string,
-    @Body('status') status: 'accepted' | 'declined',
-  ) {
-    return this.matches.respond(matchId, user.id, inviteId, status);
+  respond(@CurrentUser() user: User, @Param('id') matchId: string, @Body() dto: RespondInviteDto) {
+    const joinDto: JoinMatchDto | undefined =
+      dto.status === 'accepted' && dto.payment
+        ? { payment: dto.payment, guestName: dto.guestName }
+        : undefined;
+    return this.matches.respond(matchId, user.id, dto.inviteId, dto.status, joinDto);
   }
 
   // Check-in

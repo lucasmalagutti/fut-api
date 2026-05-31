@@ -1,20 +1,92 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
-import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { StripePaymentProvider } from '../payments/providers/stripe.provider';
+import { UserNotifyService } from '../notifications/user-notify.service';
+import { PaymentsService } from '../payments/payments.service';
+import { WalletLedgerService } from '../wallet/wallet-ledger.service';
 
 @Injectable()
 export class BookingScheduler {
   private readonly logger = new Logger(BookingScheduler.name);
-  private readonly provider = new StripePaymentProvider();
 
   constructor(
     private prisma: PrismaService,
-    private mail: MailService,
     private notifications: NotificationsService,
+    private notify: UserNotifyService,
+    private payments: PaymentsService,
+    private ledger: WalletLedgerService,
   ) {}
+
+  /** Dev/teste: força quorum + cobrança para uma partida (ignora janela de 2h) */
+  async triggerQuorumCharge(matchId: string) {
+    const booking = await this.prisma.booking.findFirst({
+      where: { match: { id: matchId } },
+      include: {
+        court: true,
+        match: {
+          include: {
+            participants: { where: { paymentStatus: { not: 'cancelled' } } },
+          },
+        },
+        player: true,
+      },
+    });
+
+    if (!booking?.match) {
+      throw new Error(`Partida/reserva não encontrada: ${matchId}`);
+    }
+
+    if (booking.match.confirmedAt) {
+      return {
+        matchId,
+        skipped: true,
+        reason: 'Partida já confirmada — recobrando apenas participantes não pagos',
+        charges: await this.rechargeUnpaidParticipants(booking.match.id),
+      };
+    }
+
+    if (booking.status !== 'open') {
+      throw new Error(`Reserva com status "${booking.status}" — esperado "open" para primeiro disparo`);
+    }
+
+    await this.processQuorum(booking as any);
+
+    const updated = await this.prisma.match.findUnique({
+      where: { id: matchId },
+      include: {
+        booking: true,
+        participants: {
+          where: { paymentStatus: { not: 'cancelled' } },
+          include: { user: { select: { email: true } } },
+        },
+      },
+    });
+
+    return {
+      matchId,
+      bookingStatus: updated?.booking.status,
+      confirmedAt: updated?.confirmedAt,
+      participants: updated?.participants.map((p) => ({
+        email: p.user.email,
+        quota: p.quota,
+        paymentStatus: p.paymentStatus,
+        preferredPayMethod: p.preferredPayMethod,
+      })),
+    };
+  }
+
+  private async rechargeUnpaidParticipants(matchId: string) {
+    const unpaid = await this.prisma.matchParticipant.findMany({
+      where: { matchId, paymentStatus: { in: ['joined', 'unpaid'] } },
+    });
+    const results: { participantId: string; userId: string; ok: boolean; error?: string }[] = [];
+    for (const p of unpaid) {
+      const r = await this.payments.chargeParticipantScheduled(p.id);
+      results.push({ participantId: p.id, userId: p.userId, ...r });
+    }
+    return results;
+  }
 
   // ── Verificacao de quorum a cada minuto ───────────────────────────────────
   // Busca bookings open cuja partida inicia entre agora e 2h10min (janela de 10min)
@@ -116,120 +188,30 @@ export class BookingScheduler {
 
     this.logger.log(`Match ${match.id} confirmada — ${totalSlots} slots, cota R$${quota}`);
 
-    // Cobrar cada participante
-    for (const p of participants) {
-      await this.chargeParticipant(p, booking, match, quota).catch((err) => {
-        this.logger.error(`Falha ao cobrar participante ${p.userId}: ${err.message}`);
-      });
-    }
-  }
+    await this.notify
+      .bookingConfirmed(booking.playerId, {
+        bookingId: booking.id,
+        courtName: booking.court.name,
+        startsAt: booking.startsAt,
+      })
+      .catch(() => null);
 
-  // Cobrar participante: cartao automatico ou PIX com prazo
-  private async chargeParticipant(participant: any, booking: any, match: any, quotaPerSlot: number) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: participant.userId },
-      include: { cards: { where: { isDefault: true }, take: 1 } },
+    const toCharge = await this.prisma.matchParticipant.findMany({
+      where: { matchId: match.id, paymentStatus: { not: 'cancelled' } },
     });
-    if (!user) return;
 
-    const amount = parseFloat((quotaPerSlot * participant.slots).toFixed(2));
-
-    // Verificar se ja tem cartao padrao → cobrar automaticamente
-    const defaultCard = (user as any).cards?.[0];
-
-    if (defaultCard) {
-      try {
-        const result = await this.provider.checkoutCard(
-          `${booking.id}_${participant.userId}`,
-          defaultCard.providerToken,
-          amount,
-        );
-
-        const setting = await this.prisma.platformSetting.findUnique({ where: { id: 1 } });
-        const feeRate = setting?.feeRate ?? Number(process.env.DEFAULT_FEE_RATE ?? 0.1);
-        const fee = parseFloat((amount * feeRate).toFixed(2));
-
-        await this.prisma.$transaction(async (tx) => {
-          const payment = await tx.payment.create({
-            data: {
-              bookingId: booking.id,
-              method: 'card',
-              gatewayRef: result.gatewayRef,
-              amount,
-              fee,
-              status: 'paid',
-              paidAt: new Date(),
-            },
-          });
-          await tx.matchParticipant.update({
-            where: { id: participant.id },
-            data: { paymentStatus: 'paid', paymentId: payment.id },
-          });
-        });
-
-        this.logger.log(`Cartao cobrado: participante ${participant.userId} R$${amount}`);
-
-        // Notificar participante
+    for (const p of toCharge) {
+      const result = await this.payments.chargeParticipantScheduled(p.id);
+      if (!result.ok) {
         await this.notifications
-          .create(participant.userId, 'payment_charged', {
+          .create(p.userId, 'payment_charge_failed', {
             matchId: match.id,
-            amount,
-            method: 'card',
+            amount: quota * p.slots,
+            message: result.error ?? 'Não foi possível cobrar sua cota. Pague manualmente na partida.',
           })
           .catch(() => null);
-      } catch (err: any) {
-        this.logger.warn(`Falha cartao ${participant.userId}: ${err.message} — enviando PIX`);
-        await this.sendPixCharge(participant, booking, match, amount);
+        this.logger.error(`Falha ao cobrar participante ${p.userId}: ${result.error}`);
       }
-    } else {
-      // Sem cartao → enviar PIX
-      await this.sendPixCharge(participant, booking, match, amount);
-    }
-  }
-
-  private async sendPixCharge(participant: any, booking: any, match: any, amount: number) {
-    try {
-      const result = await this.provider.checkoutPix(
-        `${booking.id}_${participant.userId}`,
-        amount,
-      );
-
-      const setting = await this.prisma.platformSetting.findUnique({ where: { id: 1 } });
-      const feeRate = setting?.feeRate ?? Number(process.env.DEFAULT_FEE_RATE ?? 0.1);
-      const fee = parseFloat((amount * feeRate).toFixed(2));
-
-      const payment = await this.prisma.payment.create({
-        data: {
-          bookingId: booking.id,
-          method: 'pix',
-          gatewayRef: result.gatewayRef,
-          qrCode: result.qrCode,
-          qrCodeUrl: result.qrCodeUrl,
-          amount,
-          fee,
-          status: 'pending',
-        },
-      });
-
-      await this.prisma.matchParticipant.update({
-        where: { id: participant.id },
-        data: { paymentStatus: 'unpaid', paymentId: payment.id },
-      });
-
-      // Notificar com PIX
-      await this.notifications
-        .create(participant.userId, 'pix_payment_required', {
-          matchId: match.id,
-          paymentId: payment.id,
-          amount,
-          qrCode: result.qrCode,
-          deadline: new Date(booking.startsAt.getTime() - 60 * 60 * 1000).toISOString(),
-        })
-        .catch(() => null);
-
-      this.logger.log(`PIX enviado: participante ${participant.userId} R$${amount}`);
-    } catch (err: any) {
-      this.logger.error(`Erro ao criar PIX para ${participant.userId}: ${err.message}`);
     }
   }
 
@@ -316,6 +298,81 @@ export class BookingScheduler {
     }
   }
 
+  /** Dev/teste: credita dono (pendente) e libera saldo disponível ao finalizar partida */
+  async triggerMatchFinalize(matchId: string) {
+    const booking = await this.prisma.booking.findFirst({
+      where: { match: { id: matchId } },
+      include: {
+        court: { include: { owner: { select: { id: true, email: true, name: true } } } },
+        match: {
+          include: {
+            participants: { where: { paymentStatus: { in: ['paid', 'checked_in'] } } },
+          },
+        },
+      },
+    });
+
+    if (!booking?.match) {
+      throw new Error(`Partida/reserva não encontrada: ${matchId}`);
+    }
+    if (booking.status !== 'confirmed' && booking.status !== 'completed') {
+      throw new Error(`Reserva deve estar confirmed (atual: ${booking.status})`);
+    }
+
+    const steps: string[] = [];
+
+    if (!booking.ownerCreditedAt) {
+      await this.creditOwner(booking as any);
+      steps.push('owner_credited_pending');
+    } else {
+      steps.push('owner_already_credited');
+    }
+
+    const refreshed = await this.prisma.booking.findUnique({
+      where: { id: booking.id },
+      include: { court: true },
+    });
+    if (!refreshed) throw new Error('Booking not found after credit');
+
+    if (!refreshed.payoutReleasedAt) {
+      await this.releaseAndNotifyOwner(refreshed);
+      await this.prisma.booking.update({
+        where: { id: booking.id },
+        data: { status: 'completed', payoutReleasedAt: new Date() },
+      });
+      steps.push('payout_released_to_balance');
+    } else {
+      steps.push('payout_already_released');
+    }
+
+    const ownerWallet = await this.prisma.wallet.findUnique({
+      where: { userId: refreshed.court.ownerId },
+    });
+
+    const totalPaid =
+      booking.match.participants.reduce((acc, p) => acc + (p.quota ?? 0), 0) ?? 0;
+    const setting = await this.prisma.platformSetting.findUnique({ where: { id: 1 } });
+    const feeRate = setting?.feeRate ?? Number(process.env.DEFAULT_FEE_RATE ?? 0.1);
+    const ownerNet = parseFloat((totalPaid * (1 - feeRate)).toFixed(2));
+
+    return {
+      matchId,
+      bookingId: booking.id,
+      bookingStatus: 'completed',
+      steps,
+      totalCollected: totalPaid,
+      platformFeeRate: feeRate,
+      ownerNet,
+      owner: booking.court.owner,
+      wallet: ownerWallet
+        ? {
+            balance: ownerWallet.balance,
+            pendingBalance: ownerWallet.pendingBalance,
+          }
+        : null,
+    };
+  }
+
   private async creditOwner(booking: any) {
     const setting = await this.prisma.platformSetting.findUnique({ where: { id: 1 } });
     const feeRate = setting?.feeRate ?? Number(process.env.DEFAULT_FEE_RATE ?? 0.1);
@@ -323,29 +380,58 @@ export class BookingScheduler {
     const totalPaid = booking.match?.participants?.reduce((acc: number, p: any) => acc + (p.quota ?? 0), 0) ?? 0;
     const ownerAmount = parseFloat((totalPaid * (1 - feeRate)).toFixed(2));
 
-    const wallet = await this.prisma.wallet.upsert({
-      where: { userId: booking.court.ownerId },
-      update: { balance: { increment: ownerAmount } },
-      create: { userId: booking.court.ownerId, balance: ownerAmount },
+    await this.ledger.creditOwnerPending(booking.court.ownerId, booking.id, ownerAmount);
+
+    await this.prisma.booking.update({
+      where: { id: booking.id },
+      data: { ownerCreditedAt: new Date() },
     });
 
-    await this.prisma.$transaction([
-      this.prisma.transaction.create({
-        data: {
-          walletId: wallet.id,
-          type: 'booking_charge',
-          bookingId: booking.id,
-          amount: ownerAmount,
-          status: 'completed',
-        },
-      }),
-      this.prisma.booking.update({
-        where: { id: booking.id },
-        data: { ownerCreditedAt: new Date() },
-      }),
-    ]);
+    await this.notify
+      .ownerReservationReceived(booking.court.ownerId, {
+        amount: ownerAmount,
+        bookingId: booking.id,
+        courtName: booking.court.name,
+        startsAt: booking.startsAt,
+      })
+      .catch(() => null);
 
     this.logger.log(`Dono creditado: booking ${booking.id} R$${ownerAmount}`);
+  }
+
+  private async pendingOwnerAmount(ownerId: string, bookingId: string) {
+    const wallet = await this.prisma.wallet.findUnique({ where: { userId: ownerId } });
+    if (!wallet) return 0;
+    const pendingTxs = await this.prisma.transaction.findMany({
+      where: {
+        walletId: wallet.id,
+        bookingId,
+        type: 'booking_charge',
+        status: 'pending',
+      },
+    });
+    return pendingTxs.reduce((s, t) => s + t.amount, 0);
+  }
+
+  private async releaseAndNotifyOwner(booking: {
+    id: string;
+    startsAt: Date;
+    court: { ownerId: string; name: string };
+  }) {
+    const amount = await this.pendingOwnerAmount(booking.court.ownerId, booking.id);
+    if (amount <= 0) return 0;
+
+    await this.ledger.releaseOwnerFunds(booking.court.ownerId, booking.id);
+    await this.notify
+      .ownerReservationReceived(booking.court.ownerId, {
+        amount,
+        bookingId: booking.id,
+        courtName: booking.court.name,
+        startsAt: booking.startsAt,
+        available: true,
+      })
+      .catch(() => null);
+    return amount;
   }
 
   // ── Liberar saque apos termino da partida ─────────────────────────────────
@@ -364,6 +450,13 @@ export class BookingScheduler {
     });
 
     for (const booking of bookings) {
+      const full = await this.prisma.booking.findUnique({
+        where: { id: booking.id },
+        include: { court: true },
+      });
+      if (!full) continue;
+
+      await this.releaseAndNotifyOwner(full);
       await this.prisma.booking.update({
         where: { id: booking.id },
         data: { status: 'completed', payoutReleasedAt: new Date() },
@@ -375,13 +468,21 @@ export class BookingScheduler {
   // ── Completar bookings expirados (fallback) ───────────────────────────────
   @Cron('*/5 * * * *')
   async completeExpiredBookings() {
-    await this.prisma.booking.updateMany({
+    const expired = await this.prisma.booking.findMany({
       where: {
         status: 'confirmed',
         endsAt: { lt: new Date(Date.now() - 10 * 60 * 1000) },
         payoutReleasedAt: null,
       },
-      data: { status: 'completed', payoutReleasedAt: new Date() },
+      include: { court: true },
     });
+
+    for (const booking of expired) {
+      await this.releaseAndNotifyOwner(booking);
+      await this.prisma.booking.update({
+        where: { id: booking.id },
+        data: { status: 'completed', payoutReleasedAt: new Date() },
+      });
+    }
   }
 }

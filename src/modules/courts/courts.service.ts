@@ -10,6 +10,7 @@ import { CreateBlockDto } from './dto/create-block.dto';
 import { CreateCourtDto } from './dto/create-court.dto';
 import { CreateScheduleDto } from './dto/create-schedule.dto';
 import { UpdateCourtDto } from './dto/update-court.dto';
+import { normalizeMediaUrl } from '../../common/utils/media-url';
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
   const R = 6371;
@@ -32,8 +33,14 @@ function parseCourt<T extends { amenities: string; sport: string }>(court: T) {
   } catch {
     sports = court.sport ? [court.sport] : [];
   }
+  const photos = (court as { photos?: { url: string }[] }).photos?.map((p) => ({
+    ...p,
+    url: normalizeMediaUrl(p.url) ?? p.url,
+  }));
+
   return {
     ...court,
+    ...(photos ? { photos } : {}),
     sports,
     // Mantém sport como primeiro esporte para retrocompat
     sport: sports[0] ?? court.sport,
@@ -177,7 +184,11 @@ export class CourtsService {
     await this.assertOwner(owner.id, courtId);
     const count = await this.prisma.courtPhoto.count({ where: { courtId } });
     if (count >= 5) throw new BadRequestException('Máximo de 5 fotos por quadra.');
-    return this.prisma.courtPhoto.create({ data: { courtId, url, position } });
+    const relativeUrl = normalizeMediaUrl(url) ?? url;
+    const photo = await this.prisma.courtPhoto.create({
+      data: { courtId, url: relativeUrl, position },
+    });
+    return { ...photo, url: normalizeMediaUrl(photo.url) ?? photo.url };
   }
 
   async removePhoto(owner: User, courtId: string, photoId: string) {

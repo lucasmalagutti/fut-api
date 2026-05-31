@@ -9,6 +9,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { User } from '@prisma/client';
+import { normalizeMediaUrl } from '../../common/utils/media-url';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { MailService } from '../mail/mail.service';
@@ -105,14 +106,20 @@ export class AuthService {
   private buildTokens(user: User, keepConnected = true) {
     const payload = { sub: user.id, email: user.email, role: user.role };
 
+    // Mesmos fallbacks das strategies — sem .env o jwt.sign() quebra com 500
+    const accessSecret =
+      this.config.get<string>('JWT_ACCESS_SECRET') ?? 'jwt_access_secret_fallback';
+    const refreshSecret =
+      this.config.get<string>('JWT_REFRESH_SECRET') ?? 'jwt_refresh_secret_fallback';
+
     const accessToken = this.jwt.sign(payload, {
-      secret: this.config.get('JWT_ACCESS_SECRET'),
+      secret: accessSecret,
       expiresIn: this.config.get('JWT_ACCESS_TTL', '15m'),
     });
 
     const refreshToken = keepConnected
       ? this.jwt.sign(payload, {
-          secret: this.config.get('JWT_REFRESH_SECRET'),
+          secret: refreshSecret,
           expiresIn: this.config.get('JWT_REFRESH_TTL', '7d'),
         })
       : undefined;
@@ -122,6 +129,9 @@ export class AuthService {
 
   private sanitize(user: User) {
     const { passwordHash: _, ...safe } = user;
-    return safe;
+    return {
+      ...safe,
+      avatarUrl: normalizeMediaUrl(safe.avatarUrl) ?? safe.avatarUrl,
+    };
   }
 }

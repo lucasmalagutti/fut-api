@@ -4,6 +4,7 @@ import { User } from '@prisma/client';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CreateBankAccountDto } from './dto/create-bank-account.dto';
+import { RequestPayoutDto } from './dto/request-payout.dto';
 import { WalletService } from './wallet.service';
 
 @ApiTags('wallet')
@@ -36,12 +37,8 @@ export class WalletController {
 
   @Roles('owner')
   @Post('payouts')
-  requestPayout(
-    @CurrentUser() user: User,
-    @Body('bankAccountId') bankAccountId: string,
-    @Body('amount') amount: number,
-  ) {
-    return this.wallet.requestPayout(user.id, bankAccountId, amount);
+  requestPayout(@CurrentUser() user: User, @Body() dto: RequestPayoutDto) {
+    return this.wallet.requestPayout(user.id, dto.bankAccountId, dto.amount);
   }
 
   @Roles('owner')

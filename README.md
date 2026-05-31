@@ -23,26 +23,93 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+API **FutMatch** (NestJS + Prisma/SQLite): reservas de quadras, partidas, pagamentos (carteira/cartão/PIX), carteira do dono e notificações.
+
+Documentação interativa: `http://localhost:3000/api/docs` (com a API em execução).
 
 ## Project setup
 
 ```bash
-$ npm install
+npm install
+# Configure .env (DATABASE_URL, Stripe, MAIL_*, etc.)
+npm run db:sync
+npm run prisma:seed    # dados iniciais (opcional)
 ```
 
 ## Compile and run the project
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm run start:dev      # desenvolvimento (watch)
+npm run start:prod     # produção (após build)
+npm run build
 ```
+
+## Scripts de teste (partidas e jobs)
+
+Comandos para **simular o fluxo completo** de uma partida em desenvolvimento, sem esperar o cron (~2h antes do horário). Execute na pasta `fut-api`, na ordem abaixo, substituindo `<matchId>` pelo UUID da partida.
+
+### Fluxo recomendado
+
+| Ordem | Script | O que faz |
+|-------|--------|-----------|
+| 1 | `seed:match-players` | Cria/atualiza 10 jogadores simulados, inscreve na partida, carteira R$ 200, pagamento preferido `wallet` |
+| 2 | `trigger:match-charge` | Verifica quorum, confirma reserva, define cotas e cobra participantes |
+| 3 | `trigger:match-finalize` | Credita o dono (pendente), libera saldo disponível e marca reserva como `completed` |
+
+```bash
+# 1 — Jogadores na partida
+npm run seed:match-players -- <matchId>
+
+# 2 — Quorum + cobrança automática das cotas
+npm run trigger:match-charge -- <matchId>
+
+# 3 — Crédito do dono + liberação para saque
+npm run trigger:match-finalize -- <matchId>
+```
+
+**Exemplo (fluxo completo):**
+
+```bash
+npm run seed:match-players -- 52be26d7-3a4e-460f-9b85-0e1974ee1ddd
+npm run trigger:match-charge -- 52be26d7-3a4e-460f-9b85-0e1974ee1ddd
+npm run trigger:match-finalize -- 52be26d7-3a4e-460f-9b85-0e1974ee1ddd
+```
+
+### Detalhes por script
+
+#### `npm run seed:match-players -- <matchId>`
+
+- Usuários: `sim.jogador01@futmatch.test` … `sim.jogador10@futmatch.test`
+- Senha: `sim123456`
+- Ajusta `maxPlayers` se necessário e deixa a reserva em `open` para o trigger de cobrança
+- Reexecutar atualiza participantes existentes (preferência carteira)
+
+#### `npm run trigger:match-charge -- <matchId>`
+
+- Ignora a janela de 2h do cron; roda `BookingScheduler.triggerQuorumCharge()`
+- Se quorum ≥ `minPlayers`: reserva `confirmed`, cotas calculadas, cobrança por carteira/cartão conforme inscrição
+- Se a partida **já estava confirmada**: apenas recobra participantes ainda não pagos
+- Sem `<matchId>`: usa a **última partida** com reserva `open` e sem `closedAt`
+
+#### `npm run trigger:match-finalize -- <matchId>`
+
+- Roda `BookingScheduler.triggerMatchFinalize()`
+- Credita o dono (valor líquido após taxa da plataforma) e move de pendente → saldo disponível
+- Reserva passa para `completed`
+- Sem `<matchId>`: usa ID padrão definido em `prisma/trigger-match-finalize.ts` (altere no arquivo ou passe o argumento)
+
+### Outros scripts úteis
+
+```bash
+npm run prisma:seed          # seed principal (usuários, quadras, etc.)
+npm run unseed               # remove dados do seed
+npm run fix:media-urls       # normaliza URLs /storage/... no banco (legado com IP fixo)
+npm run db:sync              # prisma generate + migrate deploy
+```
+
+### Produção vs. desenvolvimento
+
+Em produção, o mesmo fluxo ocorre pelos **crons** do `BookingScheduler` (quorum ~2h antes do início, crédito do dono no início, liberação ao fim da partida). Os triggers acima são atalhos para testes locais.
 
 ## Run tests
 

@@ -6,9 +6,9 @@ export class CheckoutDto {
   @IsString()
   bookingId!: string;
 
-  @ApiProperty({ enum: ['card', 'pix'] })
-  @IsEnum(['card', 'pix'])
-  method!: 'card' | 'pix';
+  @ApiProperty({ enum: ['card', 'pix', 'wallet'] })
+  @IsEnum(['card', 'pix', 'wallet'])
+  method!: 'card' | 'pix' | 'wallet';
 
   @ApiPropertyOptional()
   @IsOptional()

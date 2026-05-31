@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ChangePasswordDto } from '../auth/dto/change-password.dto';
+import { normalizeMediaUrl } from '../../common/utils/media-url';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 @Injectable()
@@ -9,12 +10,19 @@ export class UsersService {
   constructor(private prisma: PrismaService) {}
 
   async update(userId: string, dto: UpdateUserDto) {
+    const data = { ...dto };
+    if (dto.avatarUrl !== undefined) {
+      data.avatarUrl = normalizeMediaUrl(dto.avatarUrl) ?? dto.avatarUrl;
+    }
     const user = await this.prisma.user.update({
       where: { id: userId },
-      data: dto,
+      data,
     });
     const { passwordHash: _, ...safe } = user;
-    return safe;
+    return {
+      ...safe,
+      avatarUrl: normalizeMediaUrl(safe.avatarUrl) ?? safe.avatarUrl,
+    };
   }
 
   async changePassword(userId: string, dto: ChangePasswordDto) {

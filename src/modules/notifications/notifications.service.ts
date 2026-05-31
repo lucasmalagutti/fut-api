@@ -20,10 +20,22 @@ export class NotificationsService {
   }
 
   async findAll(userId: string) {
-    return this.prisma.notification.findMany({
+    const rows = await this.prisma.notification.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
     });
+    return rows.map((n) => ({
+      ...n,
+      payload: this.parsePayload(n.payload),
+    }));
+  }
+
+  private parsePayload(raw: string): Record<string, unknown> {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
   }
 
   async markAllRead(userId: string) {
@@ -46,10 +58,11 @@ export class NotificationsService {
     const tokens = await this.prisma.deviceToken.findMany({ where: { userId } });
     if (!tokens.length) return;
 
+    const body = this.bodyFor(type, payload);
     const messages = tokens.map((t) => ({
       to: t.expoToken,
       title: this.titleFor(type),
-      body: JSON.stringify(payload),
+      body,
       data: payload,
     }));
 
@@ -74,9 +87,26 @@ export class NotificationsService {
   private titleFor(type: string) {
     const map: Record<string, string> = {
       match_invite: 'Convite para partida',
+      match_joined: 'Novo jogador na partida',
+      match_cancelled_quorum: 'Partida cancelada',
+      payment_charged: 'Pagamento realizado',
+      deposit_confirmed: 'Depósito confirmado',
+      booking_confirmed: 'Reserva confirmada',
+      pix_payment_required: 'PIX pendente',
+      account_blocked_pix: 'Conta bloqueada',
+      payout_completed: 'Saque realizado',
+      payment_received: 'Reserva recebida',
+      owner_funds_available: 'Valor disponível',
+      payment_charge_failed: 'Falha na cobrança',
       booking_reminder: 'Lembrete de reserva',
       ban_warning: 'Aviso da plataforma',
     };
     return map[type] ?? 'FutMatch';
+  }
+
+  private bodyFor(type: string, payload: object) {
+    const p = payload as Record<string, unknown>;
+    if (typeof p.message === 'string') return p.message;
+    return this.titleFor(type);
   }
 }

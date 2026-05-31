@@ -14,6 +14,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { SignupDto } from './dto/signup.dto';
+import { normalizeMediaUrl } from '../../common/utils/media-url';
 import { UpdateUserDto } from '../users/dto/update-user.dto';
 
 @ApiTags('auth')
@@ -64,7 +65,10 @@ export class AuthController {
   @Get('me')
   getMe(@CurrentUser() user: User) {
     const { passwordHash: _, ...safe } = user;
-    return safe;
+    return {
+      ...safe,
+      avatarUrl: normalizeMediaUrl(safe.avatarUrl) ?? safe.avatarUrl,
+    };
   }
 
   @ApiBearerAuth()

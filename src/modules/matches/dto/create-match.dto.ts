@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsBoolean, IsInt, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
+import { MatchPaymentPreferenceDto } from './match-payment-preference.dto';
 
 export class CreateMatchDto {
   @ApiProperty()
@@ -24,4 +26,9 @@ export class CreateMatchDto {
   @IsOptional()
   @IsBoolean()
   isPublic?: boolean;
+
+  @ApiProperty({ description: 'Forma de pagamento da sua cota (cobrada 2h antes)' })
+  @ValidateNested()
+  @Type(() => MatchPaymentPreferenceDto)
+  payment!: MatchPaymentPreferenceDto;
 }

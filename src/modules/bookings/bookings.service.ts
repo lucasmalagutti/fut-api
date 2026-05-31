@@ -8,16 +8,12 @@ import {
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { User } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { MailService } from '../mail/mail.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 
 @Injectable()
 export class BookingsService {
-  constructor(
-    private prisma: PrismaService,
-    private mail: MailService,
-  ) {}
+  constructor(private prisma: PrismaService) {}
 
   async create(player: User, dto: CreateBookingDto) {
     if (player.role !== 'player') throw new ForbiddenException('Only players can create bookings');
@@ -72,10 +68,6 @@ export class BookingsService {
       });
     });
 
-    await this.mail
-      .sendBookingConfirmation(player.email, booking.id, booking.court.name, startsAt)
-      .catch(() => null);
-
     return booking;
   }
 
@@ -86,7 +78,7 @@ export class BookingsService {
         ...(query.status && { status: query.status as any }),
         ...(query.q && { court: { name: { contains: query.q } } }),
       },
-      include: { court: { include: { photos: true } }, payment: true },
+      include: { court: { include: { photos: true } }, payments: true },
       orderBy: { startsAt: 'desc' },
     });
   }
@@ -94,7 +86,7 @@ export class BookingsService {
   async findOne(userId: string, id: string) {
     const booking = await this.prisma.booking.findUnique({
       where: { id },
-      include: { court: true, payment: true, review: true, match: true },
+      include: { court: true, payments: true, review: true, match: true },
     });
     if (!booking) throw new NotFoundException('Booking not found');
     return booking;
@@ -103,7 +95,7 @@ export class BookingsService {
   async cancel(userId: string, id: string, reason?: string) {
     const booking = await this.prisma.booking.findUnique({
       where: { id },
-      include: { court: true, payment: true },
+      include: { court: true, payments: true },
     });
     if (!booking) throw new NotFoundException('Booking not found');
     if (booking.playerId !== userId && booking.court.ownerId !== userId) {
@@ -122,8 +114,12 @@ export class BookingsService {
       data: { status: 'cancelled', cancellationReason: reason },
     });
 
-    if (shouldRefund && booking.payment?.status === 'paid') {
-      await this.prisma.payment.update({ where: { bookingId: id }, data: { status: 'refunded' } });
+    const paidPayment = booking.payments?.find((p) => p.status === 'paid');
+    if (shouldRefund && paidPayment) {
+      await this.prisma.payment.update({
+        where: { id: paidPayment.id },
+        data: { status: 'refunded' },
+      });
     }
 
     return { message: 'Booking cancelled', refunded: shouldRefund };
@@ -181,7 +177,7 @@ export class BookingsService {
       where: {
         status: 'pending',
         createdAt: { lt: ttl },
-        payment: null,
+        payments: { none: { status: 'paid' } },
       },
       select: { id: true },
     });

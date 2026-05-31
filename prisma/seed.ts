@@ -145,8 +145,17 @@ async function main() {
       endsAt: new Date('2026-04-20T11:00:00Z'),
       totalPrice: 120,
       status: 'completed',
-      payment: {
-        create: { method: 'pix', gatewayRef: 'mock_seed_payment', amount: 120, fee: 12, status: 'paid', paidAt: new Date('2026-04-20T10:00:00Z') },
+      payments: {
+        create: {
+          userId: player1.id,
+          purpose: 'booking_host',
+          method: 'pix',
+          gatewayRef: 'mock_seed_payment',
+          amount: 120,
+          fee: 12,
+          status: 'paid',
+          paidAt: new Date('2026-04-20T10:00:00Z'),
+        },
       },
     },
   });
