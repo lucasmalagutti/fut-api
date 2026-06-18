@@ -95,6 +95,22 @@ export class MatchesService {
 
   // Lista partidas abertas para uma quadra/data — para jogadores ingressarem
   async findOpen(courtId?: string, date?: string) {
+    const now = new Date();
+    let startsAtFilter: { gte?: Date; gt?: Date; lte?: Date };
+
+    if (date) {
+      const dayStart = new Date(date);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(date);
+      dayEnd.setHours(23, 59, 59, 999);
+      startsAtFilter = {
+        gte: dayStart > now ? dayStart : now,
+        lte: dayEnd,
+      };
+    } else {
+      startsAtFilter = { gt: now };
+    }
+
     const where: any = {
       isPublic: true,
       closedAt: null,
@@ -102,13 +118,7 @@ export class MatchesService {
       booking: {
         status: 'open',
         ...(courtId && { courtId }),
-        ...(date && {
-          startsAt: {
-            gte: new Date(`${date}T00:00:00.000Z`),
-            lt: new Date(`${date}T23:59:59.999Z`),
-          },
-        }),
-        startsAt: { gt: new Date() },
+        startsAt: startsAtFilter,
       },
     };
 
@@ -158,7 +168,7 @@ export class MatchesService {
     const match = await this.prisma.match.findUnique({
       where: { id: matchId },
       include: {
-        booking: true,
+        booking: { include: { court: { select: { name: true } } } },
         participants: { where: { paymentStatus: { not: 'cancelled' } } },
       },
     });
@@ -217,6 +227,16 @@ export class MatchesService {
         .create(match.hostId, 'match_joined', { matchId, playerName: user.name, guestName: dto.guestName })
         .catch(() => null);
     }
+
+    const courtName = match.booking.court?.name;
+    const courtSuffix = courtName ? ` em ${courtName}` : '';
+    const joinMessage = dto.guestName
+      ? `Você e ${dto.guestName} entraram na partida de ${match.sport}${courtSuffix}.`
+      : `Você entrou na partida de ${match.sport}${courtSuffix}.`;
+
+    await this.notifications
+      .create(user.id, 'match_join_confirmed', { matchId, sport: match.sport, courtName, message: joinMessage })
+      .catch(() => null);
 
     this.logger.log(`${user.name} joined match ${matchId}${dto.guestName ? ` with guest ${dto.guestName}` : ''}`);
     return participant;
