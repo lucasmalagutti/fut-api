@@ -88,6 +88,7 @@ export class NotificationsService {
     const map: Record<string, string> = {
       match_invite: 'Convite para partida',
       match_joined: 'Novo jogador na partida',
+      match_join_confirmed: 'Você entrou na partida',
       match_cancelled_quorum: 'Partida cancelada',
       payment_charged: 'Pagamento realizado',
       deposit_confirmed: 'Depósito confirmado',

@@ -71,22 +71,60 @@ export class BookingsService {
     return booking;
   }
 
-  async findMine(userId: string, role: string, query: { q?: string; status?: string }) {
+  async findMine(
+    userId: string,
+    role: string,
+    query: { q?: string; status?: string; upcoming?: string },
+  ) {
+    const now = new Date();
+    const isUpcoming = query.upcoming === 'true';
+
     return this.prisma.booking.findMany({
       where: {
         ...(role === 'player' ? { playerId: userId } : { court: { ownerId: userId } }),
         ...(query.status && { status: query.status as any }),
+        ...(isUpcoming && {
+          endsAt: { gte: now },
+          status: { notIn: ['cancelled'] },
+        }),
         ...(query.q && { court: { name: { contains: query.q } } }),
       },
-      include: { court: { include: { photos: true } }, payments: true },
-      orderBy: { startsAt: 'desc' },
+      include: {
+        court: { include: { photos: true } },
+        payments: true,
+        player: { select: { id: true, name: true, avatarUrl: true } },
+        match: {
+          include: {
+            host: { select: { id: true, name: true, avatarUrl: true } },
+            participants: {
+              where: { paymentStatus: { not: 'cancelled' } },
+              select: { id: true, slots: true },
+            },
+          },
+        },
+      },
+      orderBy: { startsAt: isUpcoming ? 'asc' : 'desc' },
     });
   }
 
   async findOne(userId: string, id: string) {
     const booking = await this.prisma.booking.findUnique({
       where: { id },
-      include: { court: true, payments: true, review: true, match: true },
+      include: {
+        court: true,
+        payments: true,
+        review: true,
+        player: { select: { id: true, name: true, avatarUrl: true } },
+        match: {
+          include: {
+            host: { select: { id: true, name: true, avatarUrl: true } },
+            participants: {
+              where: { paymentStatus: { not: 'cancelled' } },
+              include: { user: { select: { id: true, name: true, avatarUrl: true } } },
+            },
+          },
+        },
+      },
     });
     if (!booking) throw new NotFoundException('Booking not found');
     return booking;
