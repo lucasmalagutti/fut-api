@@ -332,6 +332,9 @@ export class MatchesService {
       include: { booking: true },
     });
     if (!match) throw new NotFoundException('Match not found');
+    if (match.booking.status === 'cancelled') {
+      throw new BadRequestException('Partida já cancelada');
+    }
     if (match.hostId !== userId) throw new ForbiddenException('Apenas o organizador pode cancelar a partida');
     if (match.confirmedAt) {
       throw new BadRequestException('Partida ja confirmada nao pode ser cancelada. Entre em contato com o suporte.');
@@ -360,6 +363,7 @@ export class MatchesService {
   async findMine(userId: string) {
     return this.prisma.match.findMany({
       where: {
+        booking: { status: { notIn: ['cancelled'] } },
         OR: [
           { hostId: userId },
           { participants: { some: { userId, paymentStatus: { not: 'cancelled' } } } },

@@ -142,24 +142,107 @@ export class BookingScheduler {
   }
 
   private async cancelDueToQuorum(booking: any, match: any, participants: any[]) {
+    await this.cancelMatch(booking, match, 'Quorum insuficiente', participants);
+  }
+
+  private async cancelMatch(
+    booking: any,
+    match: any,
+    reason: string,
+    participants: any[] = [],
+  ) {
+    if (booking.status === 'cancelled') return;
+
     await this.prisma.$transaction([
       this.prisma.booking.update({
         where: { id: booking.id },
-        data: { status: 'cancelled', cancellationReason: 'Quorum insuficiente' },
+        data: { status: 'cancelled', cancellationReason: reason },
+      }),
+      this.prisma.match.update({
+        where: { id: match.id },
+        data: { closedAt: match.closedAt ?? new Date() },
+      }),
+      this.prisma.matchParticipant.updateMany({
+        where: { matchId: match.id, paymentStatus: { not: 'cancelled' } },
+        data: { paymentStatus: 'cancelled' },
       }),
     ]);
 
-    this.logger.warn(`Match ${match.id} cancelada por quorum insuficiente`);
+    this.logger.warn(`Match ${match.id} cancelada: ${reason}`);
 
-    // Notificar todos os participantes
-    for (const p of participants) {
+    const notifyIds = new Set<string>([
+      match.hostId,
+      ...participants.map((p: any) => p.userId),
+    ]);
+
+    for (const userId of notifyIds) {
       await this.notifications
-        .create(p.userId, 'match_cancelled_quorum', {
+        .create(userId, 'match_cancelled_quorum', {
           matchId: match.id,
-          courtName: booking.court.name,
+          courtName: booking.court?.name,
           startsAt: booking.startsAt,
+          message: `Partida cancelada: ${reason}`,
         })
         .catch(() => null);
+    }
+  }
+
+  // Cancela partidas/reservas que passaram do horário sem confirmação ou pagamento
+  @Cron('* * * * *')
+  async cancelExpiredBookings() {
+    const now = new Date();
+
+    const expired = await this.prisma.booking.findMany({
+      where: {
+        status: { in: ['open', 'confirmed'] },
+        startsAt: { lte: now },
+      },
+      include: {
+        court: true,
+        match: {
+          include: {
+            participants: { where: { paymentStatus: { not: 'cancelled' } } },
+          },
+        },
+      },
+    });
+
+    for (const booking of expired) {
+      const match = booking.match;
+      if (!match) {
+        await this.prisma.booking.update({
+          where: { id: booking.id },
+          data: { status: 'cancelled', cancellationReason: 'Reserva expirada' },
+        });
+        continue;
+      }
+
+      if (match.confirmedAt) {
+        const hasUnpaid = match.participants.some((p) =>
+          ['joined', 'unpaid'].includes(p.paymentStatus),
+        );
+        if (hasUnpaid) {
+          await this.cancelMatch(
+            booking,
+            match,
+            'Pagamento não concluído a tempo',
+            match.participants,
+          );
+        }
+        continue;
+      }
+
+      const totalSlots = match.participants.reduce((acc, p) => acc + p.slots, 0);
+      if (totalSlots < match.minPlayers) {
+        await this.cancelMatch(booking, match, 'Quorum insuficiente', match.participants);
+      } else {
+        await this.cancelMatch(
+          booking,
+          match,
+          'Partida não confirmada a tempo',
+          match.participants,
+        );
+      }
     }
   }
 
